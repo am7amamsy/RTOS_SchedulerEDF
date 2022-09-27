@@ -40,6 +40,7 @@
 #include "task.h"
 #include "timers.h"
 #include "stack_macros.h"
+#include "GPIO.h"
 
 /* Lint e9021, e961 and e750 are suppressed as a MISRA exception justified
  * because the MPU ports require MPU_WRAPPERS_INCLUDED_FROM_API_FILE to be defined
@@ -218,11 +219,18 @@
  * Place the task represented by pxTCB into the appropriate ready list for
  * the task.  It is inserted at the end of the list.
  */
-#define prvAddTaskToReadyList( pxTCB )                                                                 \
+#if ( configUSE_EDF_SCHEDULER == 0 )
+	#define prvAddTaskToReadyList( pxTCB )                                                               \
     traceMOVED_TASK_TO_READY_STATE( pxTCB );                                                           \
     taskRECORD_READY_PRIORITY( ( pxTCB )->uxPriority );                                                \
     listINSERT_END( &( pxReadyTasksLists[ ( pxTCB )->uxPriority ] ), &( ( pxTCB )->xStateListItem ) ); \
     tracePOST_MOVED_TASK_TO_READY_STATE( pxTCB )
+#else /* if ( configUSE_EDF_SCHEDULER == 1 ) */
+	#define prvAddTaskToReadyList( pxTCB )																															 \
+		traceMOVED_TASK_TO_READY_STATE( pxTCB );																													 \
+		vListInsert( &( pxReadyTasksListEDF ), &( ( pxTCB )->xStateListItem ) );												 \
+		tracePOST_MOVED_TASK_TO_READY_STATE( pxTCB )
+#endif /* configUSE_EDF_SCHEDULER */
 /*-----------------------------------------------------------*/
 
 /*
@@ -262,7 +270,10 @@ typedef struct tskTaskControlBlock       /* The old naming convention is used to
 
     ListItem_t xStateListItem;                  /*< The list that the state list item of a task is reference from denotes the state of that task (Ready, Blocked, Suspended ). */
     ListItem_t xEventListItem;                  /*< Used to reference a task from an event list. */
-    UBaseType_t uxPriority;                     /*< The priority of the task.  0 is the lowest priority. */
+		#if ( configUSE_EDF_SCHEDULER == 1 )
+				TickType_t xTaskPeriod; 								/*< Stores the period in tick of the task. > */
+		#endif /* configUSE_EDF_SCHEDULER */
+		UBaseType_t uxPriority;                     /*< The priority of the task.  0 is the lowest priority. */
     StackType_t * pxStack;                      /*< Points to the start of the stack. */
     char pcTaskName[ configMAX_TASK_NAME_LEN ]; /*< Descriptive name given to the task when created.  Facilitates debugging only. */ /*lint !e971 Unqualified char types are allowed for strings and single characters only. */
 
@@ -344,6 +355,9 @@ PRIVILEGED_DATA TCB_t * volatile pxCurrentTCB = NULL;
  * doing so breaks some kernel aware debuggers and debuggers that rely on removing
  * the static qualifier. */
 PRIVILEGED_DATA static List_t pxReadyTasksLists[ configMAX_PRIORITIES ]; /*< Prioritised ready tasks. */
+#if ( configUSE_EDF_SCHEDULER == 1 )
+		PRIVILEGED_DATA static List_t pxReadyTasksListEDF;									 /*< Ready tasks ordered by their deadline. */
+#endif /* configUSE_EDF_SCHEDULER */
 PRIVILEGED_DATA static List_t xDelayedTaskList1;                         /*< Delayed tasks. */
 PRIVILEGED_DATA static List_t xDelayedTaskList2;                         /*< Delayed tasks (two lists are used - one for delays that have overflowed the current tick count. */
 PRIVILEGED_DATA static List_t * volatile pxDelayedTaskList;              /*< Points to the delayed task list currently being used. */
@@ -731,7 +745,7 @@ static void prvAddNewTaskToReadyList( TCB_t * pxNewTCB ) PRIVILEGED_FUNCTION;
                             void * const pvParameters,
                             UBaseType_t uxPriority,
                             TaskHandle_t * const pxCreatedTask )
-    {
+		{
         TCB_t * pxNewTCB;
         BaseType_t xReturn;
 
@@ -812,6 +826,100 @@ static void prvAddNewTaskToReadyList( TCB_t * pxNewTCB ) PRIVILEGED_FUNCTION;
 
         return xReturn;
     }
+		
+		
+		#if ( configUSE_EDF_SCHEDULER == 1 )
+				BaseType_t xTaskCreatePeriodic( TaskFunction_t pxTaskCode,
+																				const char * const pcName, /*lint !e971 Unqualified char types are allowed for strings and single characters only. */
+																				const configSTACK_DEPTH_TYPE usStackDepth,
+																				void * const pvParameters,
+																				UBaseType_t uxPriority,
+																				TaskHandle_t * const pxCreatedTask,
+																				TickType_t period )
+		{
+        TCB_t * pxNewTCB;
+        BaseType_t xReturn;
+
+        /* If the stack grows down then allocate the stack then the TCB so the stack
+         * does not grow into the TCB.  Likewise if the stack grows up then allocate
+         * the TCB then the stack. */
+        #if ( portSTACK_GROWTH > 0 )
+            {
+                /* Allocate space for the TCB.  Where the memory comes from depends on
+                 * the implementation of the port malloc function and whether or not static
+                 * allocation is being used. */
+                pxNewTCB = ( TCB_t * ) pvPortMalloc( sizeof( TCB_t ) );
+
+                if( pxNewTCB != NULL )
+                {
+                    /* Allocate space for the stack used by the task being created.
+                     * The base of the stack memory stored in the TCB so the task can
+                     * be deleted later if required. */
+                    pxNewTCB->pxStack = ( StackType_t * ) pvPortMallocStack( ( ( ( size_t ) usStackDepth ) * sizeof( StackType_t ) ) ); /*lint !e961 MISRA exception as the casts are only redundant for some ports. */
+
+                    if( pxNewTCB->pxStack == NULL )
+                    {
+                        /* Could not allocate the stack.  Delete the allocated TCB. */
+                        vPortFree( pxNewTCB );
+                        pxNewTCB = NULL;
+                    }
+                }
+            }
+        #else /* portSTACK_GROWTH */
+            {
+                StackType_t * pxStack;
+
+                /* Allocate space for the stack used by the task being created. */
+                pxStack = pvPortMallocStack( ( ( ( size_t ) usStackDepth ) * sizeof( StackType_t ) ) ); /*lint !e9079 All values returned by pvPortMalloc() have at least the alignment required by the MCU's stack and this allocation is the stack. */
+
+                if( pxStack != NULL )
+                {
+                    /* Allocate space for the TCB. */
+                    pxNewTCB = ( TCB_t * ) pvPortMalloc( sizeof( TCB_t ) ); /*lint !e9087 !e9079 All values returned by pvPortMalloc() have at least the alignment required by the MCU's stack, and the first member of TCB_t is always a pointer to the task's stack. */
+
+                    if( pxNewTCB != NULL )
+                    {
+                        /* Store the stack location in the TCB. */
+                        pxNewTCB->pxStack = pxStack;
+                    }
+                    else
+                    {
+                        /* The stack cannot be used as the TCB was not created.  Free
+                         * it again. */
+                        vPortFreeStack( pxStack );
+                    }
+                }
+                else
+                {
+                    pxNewTCB = NULL;
+                }
+            }
+        #endif /* portSTACK_GROWTH */
+
+        if( pxNewTCB != NULL )
+        {
+            #if ( tskSTATIC_AND_DYNAMIC_ALLOCATION_POSSIBLE != 0 ) /*lint !e9029 !e731 Macro has been consolidated for readability reasons. */
+                {
+                    /* Tasks can be created statically or dynamically, so note this
+                     * task was created dynamically in case it is later deleted. */
+                    pxNewTCB->ucStaticallyAllocated = tskDYNAMICALLY_ALLOCATED_STACK_AND_TCB;
+                }
+            #endif /* tskSTATIC_AND_DYNAMIC_ALLOCATION_POSSIBLE */
+						
+						/* Initialize the period */
+						pxNewTCB->xTaskPeriod = period;
+						prvInitialiseNewTask( pxTaskCode, pcName, ( uint32_t ) usStackDepth, pvParameters, uxPriority, pxCreatedTask, pxNewTCB, NULL );
+						prvAddNewTaskToReadyList( pxNewTCB );
+            xReturn = pdPASS;
+        }
+        else
+        {
+            xReturn = errCOULD_NOT_ALLOCATE_REQUIRED_MEMORY;
+        }
+
+        return xReturn;
+    }
+		#endif /* configUSE_EDF_SCHEDULER */
 
 #endif /* configSUPPORT_DYNAMIC_ALLOCATION */
 /*-----------------------------------------------------------*/
@@ -945,7 +1053,12 @@ static void prvInitialiseNewTask( TaskFunction_t pxTaskCode,
     /* Event lists are always in priority order. */
     listSET_LIST_ITEM_VALUE( &( pxNewTCB->xEventListItem ), ( TickType_t ) configMAX_PRIORITIES - ( TickType_t ) uxPriority ); /*lint !e961 MISRA exception as the casts are only redundant for some ports. */
     listSET_LIST_ITEM_OWNER( &( pxNewTCB->xEventListItem ), pxNewTCB );
-
+		
+		#if ( configUSE_EDF_SCHEDULER == 1	)
+				/* Insert the period value in the generic list item before to add the task in RL: */
+				listSET_LIST_ITEM_VALUE( &( ( pxNewTCB )->xStateListItem ), ( pxNewTCB)->xTaskPeriod + xTaskGetTickCount());
+		#endif /* configUSE_EDF_SCHEDULER */
+		
     #if ( portCRITICAL_NESTING_IN_TCB == 1 )
         {
             pxNewTCB->uxCriticalNesting = ( UBaseType_t ) 0U;
@@ -1101,14 +1214,25 @@ static void prvAddNewTaskToReadyList( TCB_t * pxNewTCB )
              * so far. */
             if( xSchedulerRunning == pdFALSE )
             {
-                if( pxCurrentTCB->uxPriority <= pxNewTCB->uxPriority )
-                {
-                    pxCurrentTCB = pxNewTCB;
-                }
-                else
-                {
-                    mtCOVERAGE_TEST_MARKER();
-                }
+								#if ( configUSE_EDF_SCHEDULER == 0 )
+										if( pxCurrentTCB->uxPriority <= pxNewTCB->uxPriority )
+										{
+												pxCurrentTCB = pxNewTCB;
+										}
+										else
+										{
+												mtCOVERAGE_TEST_MARKER();
+										}
+								#else /* if ( configUSE_EDF_SCHEDULER == 1 ) */
+										if( pxCurrentTCB->xTaskPeriod >= pxNewTCB->xTaskPeriod )
+										{
+												pxCurrentTCB = pxNewTCB;
+										}
+										else
+										{
+												mtCOVERAGE_TEST_MARKER();
+										}					
+								#endif /* configUSE_EDF_SCHEDULER */
             }
             else
             {
@@ -1136,14 +1260,25 @@ static void prvAddNewTaskToReadyList( TCB_t * pxNewTCB )
     {
         /* If the created task is of a higher priority than the current task
          * then it should run now. */
-        if( pxCurrentTCB->uxPriority < pxNewTCB->uxPriority )
-        {
-            taskYIELD_IF_USING_PREEMPTION();
-        }
-        else
-        {
-            mtCOVERAGE_TEST_MARKER();
-        }
+				#if ( configUSE_EDF_SCHEDULER == 0 )
+					if( pxCurrentTCB->uxPriority < pxNewTCB->uxPriority )
+						{
+								taskYIELD_IF_USING_PREEMPTION();
+						}
+						else
+						{
+								mtCOVERAGE_TEST_MARKER();
+						}
+				#else /* if (configUSE_EDF_SCHEDULER == 1 ) */
+						if( pxCurrentTCB->xTaskPeriod > pxNewTCB->xTaskPeriod )
+						{
+								taskYIELD_IF_USING_PREEMPTION();
+						}
+						else
+						{
+								mtCOVERAGE_TEST_MARKER();
+						}
+				#endif
     }
     else
     {
@@ -1888,17 +2023,31 @@ static void prvAddNewTaskToReadyList( TCB_t * pxNewTCB )
                     prvAddTaskToReadyList( pxTCB );
 
                     /* A higher priority task may have just been resumed. */
-                    if( pxTCB->uxPriority >= pxCurrentTCB->uxPriority )
-                    {
-                        /* This yield may not cause the task just resumed to run,
-                         * but will leave the lists in the correct state for the
-                         * next yield. */
-                        taskYIELD_IF_USING_PREEMPTION();
-                    }
-                    else
-                    {
-                        mtCOVERAGE_TEST_MARKER();
-                    }
+										#if ( configUSE_EDF_SCHEDULER == 0 )
+												if( pxTCB->uxPriority >= pxCurrentTCB->uxPriority )
+												{
+														/* This yield may not cause the task just resumed to run,
+														 * but will leave the lists in the correct state for the
+														 * next yield. */
+														taskYIELD_IF_USING_PREEMPTION();
+												}
+												else
+												{
+														mtCOVERAGE_TEST_MARKER();
+												}
+										#else /* if ( configUSE_EDF_SCHEDULER == 0 ) */
+												if( pxTCB->xTaskPeriod <= pxCurrentTCB->xTaskPeriod )
+												{
+														/* This yield may not cause the task just resumed to run,
+														 * but will leave the lists in the correct state for the
+														 * next yield. */
+														taskYIELD_IF_USING_PREEMPTION();
+												}
+												else
+												{
+														mtCOVERAGE_TEST_MARKER();
+												}
+										#endif
                 }
                 else
                 {
@@ -1956,19 +2105,35 @@ static void prvAddNewTaskToReadyList( TCB_t * pxNewTCB )
                 {
                     /* Ready lists can be accessed so move the task from the
                      * suspended list to the ready list directly. */
-                    if( pxTCB->uxPriority >= pxCurrentTCB->uxPriority )
-                    {
-                        xYieldRequired = pdTRUE;
+										#if ( configUSE_EDF_SCHEDULER == 0 )
+												if( pxTCB->uxPriority >= pxCurrentTCB->uxPriority )
+												{
+														xYieldRequired = pdTRUE;
 
-                        /* Mark that a yield is pending in case the user is not
-                         * using the return value to initiate a context switch
-                         * from the ISR using portYIELD_FROM_ISR. */
-                        xYieldPending = pdTRUE;
-                    }
-                    else
-                    {
-                        mtCOVERAGE_TEST_MARKER();
-                    }
+														/* Mark that a yield is pending in case the user is not
+														 * using the return value to initiate a context switch
+														 * from the ISR using portYIELD_FROM_ISR. */
+														xYieldPending = pdTRUE;
+												}
+												else
+												{
+														mtCOVERAGE_TEST_MARKER();
+												}
+										#else /* if ( configUSE_EDF_SCHEDULER == 1 ) */
+												if( pxTCB->xTaskPeriod <= pxCurrentTCB->xTaskPeriod )
+												{
+														xYieldRequired = pdTRUE;
+
+														/* Mark that a yield is pending in case the user is not
+														 * using the return value to initiate a context switch
+														 * from the ISR using portYIELD_FROM_ISR. */
+														xYieldPending = pdTRUE;
+												}
+												else
+												{
+														mtCOVERAGE_TEST_MARKER();
+												}
+										#endif
 
                     ( void ) uxListRemove( &( pxTCB->xStateListItem ) );
                     prvAddTaskToReadyList( pxTCB );
@@ -2025,16 +2190,28 @@ void vTaskStartScheduler( void )
                 xReturn = pdFAIL;
             }
         }
-    #else /* if ( configSUPPORT_STATIC_ALLOCATION == 1 ) */
+    #else /* if ( configSUPPORT_STATIC_ALLOCATION == 0 ) */
         {
-            /* The Idle task is being created using dynamically allocated RAM. */
-            xReturn = xTaskCreate( prvIdleTask,
-                                   configIDLE_TASK_NAME,
-                                   configMINIMAL_STACK_SIZE,
-                                   ( void * ) NULL,
-                                   portPRIVILEGE_BIT,  /* In effect ( tskIDLE_PRIORITY | portPRIVILEGE_BIT ), but tskIDLE_PRIORITY is zero. */
-                                   &xIdleTaskHandle ); /*lint !e961 MISRA exception, justified as it is not a redundant explicit cast to all supported compilers. */
-        }
+						#if ( configUSE_EDF_SCHEDULER == 1 )
+								/* The Idle task is being created using dynamically allocated RAM. */
+								TickType_t initIDLEPeriod = 200;
+								xReturn = xTaskCreatePeriodic( prvIdleTask,
+																							 configIDLE_TASK_NAME,
+																							 configMINIMAL_STACK_SIZE,
+																							 ( void * ) NULL,
+																							 portPRIVILEGE_BIT,  /* In effect ( tskIDLE_PRIORITY | portPRIVILEGE_BIT ), but tskIDLE_PRIORITY is zero. */
+																							 &xIdleTaskHandle,	 /*lint !e961 MISRA exception, justified as it is not a redundant explicit cast to all supported compilers. */
+																							 initIDLEPeriod );	 /* Store the period in tick of the task. */
+						#else /* configUSE_EDF_SCHEDULER */
+								/* The Idle task is being created using dynamically allocated RAM. */
+								xReturn = xTaskCreate( prvIdleTask,
+																			 configIDLE_TASK_NAME,
+																			 configMINIMAL_STACK_SIZE,
+																			 ( void * ) NULL,
+																			 portPRIVILEGE_BIT,  /* In effect ( tskIDLE_PRIORITY | portPRIVILEGE_BIT ), but tskIDLE_PRIORITY is zero. */
+																			 &xIdleTaskHandle ); /*lint !e961 MISRA exception, justified as it is not a redundant explicit cast to all supported compilers. */
+						#endif /* configUSE_EDF_SCHEDULER */
+				}
     #endif /* configSUPPORT_STATIC_ALLOCATION */
 
     #if ( configUSE_TIMERS == 1 )
@@ -2251,14 +2428,25 @@ BaseType_t xTaskResumeAll( void )
 
                     /* If the moved task has a priority higher than or equal to
                      * the current task then a yield must be performed. */
-                    if( pxTCB->uxPriority >= pxCurrentTCB->uxPriority )
-                    {
-                        xYieldPending = pdTRUE;
-                    }
-                    else
-                    {
-                        mtCOVERAGE_TEST_MARKER();
-                    }
+										#if ( configUSE_EDF_SCHEDULER == 0 )
+												if( pxTCB->uxPriority >= pxCurrentTCB->uxPriority )
+												{
+														xYieldPending = pdTRUE;
+												}
+												else
+												{
+														mtCOVERAGE_TEST_MARKER();
+												}
+										#else /* if ( configUSE_EDF_SCHEDULER == 1 ) */
+												if( pxTCB->xTaskPeriod <= pxCurrentTCB->xTaskPeriod )
+												{
+														xYieldPending = pdTRUE;
+												}
+												else
+												{
+														mtCOVERAGE_TEST_MARKER();
+												}					
+										#endif /* configUSE_EDF_SCHEDULER */
                 }
 
                 if( pxTCB != NULL )
@@ -2821,7 +3009,10 @@ BaseType_t xTaskIncrementTick( void )
 
                     /* Place the unblocked task into the appropriate ready
                      * list. */
-                    prvAddTaskToReadyList( pxTCB );
+										#if ( configUSE_EDF_SCHEDULER == 1 )
+												listSET_LIST_ITEM_VALUE( &( pxTCB->xStateListItem ), pxTCB->xTaskPeriod + xTaskGetTickCount());
+                    #endif /* configUSE_EDF_SCHEDULER */
+										prvAddTaskToReadyList( pxTCB );
 
                     /* A task being unblocked cannot cause an immediate
                      * context switch if preemption is turned off. */
@@ -2831,14 +3022,25 @@ BaseType_t xTaskIncrementTick( void )
                              * only be performed if the unblocked task has a
                              * priority that is equal to or higher than the
                              * currently executing task. */
-                            if( pxTCB->uxPriority >= pxCurrentTCB->uxPriority )
-                            {
-                                xSwitchRequired = pdTRUE;
-                            }
-                            else
-                            {
-                                mtCOVERAGE_TEST_MARKER();
-                            }
+														#if ( configUSE_EDF_SCHEDULER == 0 )
+																if( pxTCB->uxPriority >= pxCurrentTCB->uxPriority )
+																{
+																		xSwitchRequired = pdTRUE;
+																}
+																else
+																{
+																		mtCOVERAGE_TEST_MARKER();
+																}
+														#else /* if ( configUSE_EDF_SCHEDULER == 1 ) */
+																if( pxTCB->xTaskPeriod <= pxCurrentTCB->xTaskPeriod )
+																{
+																		xSwitchRequired = pdTRUE;
+																}
+																else
+																{
+																		mtCOVERAGE_TEST_MARKER();
+																}
+														#endif /* configUSE_EDF_SCHEDULER */
                         }
                     #endif /* configUSE_PREEMPTION */
                 }
@@ -3071,8 +3273,12 @@ void vTaskSwitchContext( void )
 
         /* Select a new task to run using either the generic C or port
          * optimised asm code. */
-        taskSELECT_HIGHEST_PRIORITY_TASK(); /*lint !e9079 void * is used as this macro is used with timers and co-routines too.  Alignment is known to be fine as the type of the pointer stored and retrieved is the same. */
-        traceTASK_SWITCHED_IN();
+				#if ( configUSE_EDF_SCHEDULER == 0 )
+						taskSELECT_HIGHEST_PRIORITY_TASK(); /*lint !e9079 void * is used as this macro is used with timers and co-routines too.  Alignment is known to be fine as the type of the pointer stored and retrieved is the same. */
+        #else /* if ( configUSE_EDF_SCHEDULER == 1 ) */
+						pxCurrentTCB = (TCB_t * ) listGET_OWNER_OF_HEAD_ENTRY( &( pxReadyTasksListEDF ) );
+				#endif
+				traceTASK_SWITCHED_IN();
 
         /* After the new task is switched in, update the global errno. */
         #if ( configUSE_POSIX_ERRNO == 1 )
@@ -3228,21 +3434,39 @@ BaseType_t xTaskRemoveFromEventList( const List_t * const pxEventList )
         listINSERT_END( &( xPendingReadyList ), &( pxUnblockedTCB->xEventListItem ) );
     }
 
-    if( pxUnblockedTCB->uxPriority > pxCurrentTCB->uxPriority )
-    {
-        /* Return true if the task removed from the event list has a higher
-         * priority than the calling task.  This allows the calling task to know if
-         * it should force a context switch now. */
-        xReturn = pdTRUE;
+		#if ( configUSE_EDF_SCHEDULER == 0 )
+				if( pxUnblockedTCB->uxPriority > pxCurrentTCB->uxPriority )
+				{
+						/* Return true if the task removed from the event list has a higher
+						 * priority than the calling task.  This allows the calling task to know if
+						 * it should force a context switch now. */
+						xReturn = pdTRUE;
 
-        /* Mark that a yield is pending in case the user is not using the
-         * "xHigherPriorityTaskWoken" parameter to an ISR safe FreeRTOS function. */
-        xYieldPending = pdTRUE;
-    }
-    else
-    {
-        xReturn = pdFALSE;
-    }
+						/* Mark that a yield is pending in case the user is not using the
+						 * "xHigherPriorityTaskWoken" parameter to an ISR safe FreeRTOS function. */
+						xYieldPending = pdTRUE;
+				}
+				else
+				{
+						xReturn = pdFALSE;
+				}
+		#else /* if ( configUSE_EDF_SCHEDULER == 1 ) */
+				if( pxUnblockedTCB->xTaskPeriod < pxCurrentTCB->xTaskPeriod )
+				{
+						/* Return true if the task removed from the event list has a higher
+						 * priority than the calling task.  This allows the calling task to know if
+						 * it should force a context switch now. */
+						xReturn = pdTRUE;
+
+						/* Mark that a yield is pending in case the user is not using the
+						 * "xHigherPriorityTaskWoken" parameter to an ISR safe FreeRTOS function. */
+						xYieldPending = pdTRUE;
+				}
+				else
+				{
+						xReturn = pdFALSE;
+				}
+		#endif
 
     return xReturn;
 }
@@ -3286,14 +3510,25 @@ void vTaskRemoveFromUnorderedEventList( ListItem_t * pxEventListItem,
     listREMOVE_ITEM( &( pxUnblockedTCB->xStateListItem ) );
     prvAddTaskToReadyList( pxUnblockedTCB );
 
-    if( pxUnblockedTCB->uxPriority > pxCurrentTCB->uxPriority )
-    {
-        /* The unblocked task has a priority above that of the calling task, so
-         * a context switch is required.  This function is called with the
-         * scheduler suspended so xYieldPending is set so the context switch
-         * occurs immediately that the scheduler is resumed (unsuspended). */
-        xYieldPending = pdTRUE;
-    }
+		#if ( configUSE_EDF_SCHEDULER == 0 )
+				if( pxUnblockedTCB->uxPriority > pxCurrentTCB->uxPriority )
+				{
+						/* The unblocked task has a priority above that of the calling task, so
+						 * a context switch is required.  This function is called with the
+						 * scheduler suspended so xYieldPending is set so the context switch
+						 * occurs immediately that the scheduler is resumed (unsuspended). */
+						xYieldPending = pdTRUE;
+				}
+		#else /* if ( configUSE_EDF_SCHEDULER == 0 ) */
+				if( pxUnblockedTCB->xTaskPeriod < pxCurrentTCB->xTaskPeriod )
+				{
+						/* The unblocked task has a priority above that of the calling task, so
+						 * a context switch is required.  This function is called with the
+						 * scheduler suspended so xYieldPending is set so the context switch
+						 * occurs immediately that the scheduler is resumed (unsuspended). */
+						xYieldPending = pdTRUE;
+				}
+		#endif
 }
 /*-----------------------------------------------------------*/
 
@@ -3478,14 +3713,22 @@ static portTASK_FUNCTION( prvIdleTask, pvParameters )
                  * the list, and an occasional incorrect value will not matter.  If
                  * the ready list at the idle priority contains more than one task
                  * then a task other than the idle task is ready to execute. */
-                if( listCURRENT_LIST_LENGTH( &( pxReadyTasksLists[ tskIDLE_PRIORITY ] ) ) > ( UBaseType_t ) 1 )
-                {
-                    taskYIELD();
-                }
-                else
-                {
-                    mtCOVERAGE_TEST_MARKER();
-                }
+								#if ( configUSE_EDF_SCHEDULER == 1 )
+										listSET_LIST_ITEM_VALUE( &( pxCurrentTCB->xStateListItem ), pxCurrentTCB->xTaskPeriod + xTaskGetTickCount());
+										if( listCURRENT_LIST_LENGTH( &( pxReadyTasksListEDF ) ) )
+										{
+												taskYIELD();
+										}
+								#else /* if ( configUSE_EDF_SCHEDULER == 0 ) */
+										if( listCURRENT_LIST_LENGTH( &( pxReadyTasksLists[ tskIDLE_PRIORITY ] ) ) > ( UBaseType_t ) 1 )
+										{
+												taskYIELD();
+										}
+										else
+										{
+												mtCOVERAGE_TEST_MARKER();
+										}
+								#endif
             }
         #endif /* ( ( configUSE_PREEMPTION == 1 ) && ( configIDLE_SHOULD_YIELD == 1 ) ) */
 
@@ -3671,6 +3914,12 @@ static void prvInitialiseTaskLists( void )
     {
         vListInitialise( &( pxReadyTasksLists[ uxPriority ] ) );
     }
+		
+		#if ( configUSE_EDF_SCHEDULER == 1 )
+		{
+				vListInitialise( &( pxReadyTasksListEDF ) );
+		}
+		#endif /* configUSE_EDF_SCHEDULER */
 
     vListInitialise( &xDelayedTaskList1 );
     vListInitialise( &xDelayedTaskList2 );
@@ -4955,17 +5204,30 @@ TickType_t uxTaskResetEventItemValue( void )
                         prvResetNextTaskUnblockTime();
                     }
                 #endif
-
-                if( pxTCB->uxPriority > pxCurrentTCB->uxPriority )
-                {
-                    /* The notified task has a priority above the currently
-                     * executing task so a yield is required. */
-                    taskYIELD_IF_USING_PREEMPTION();
-                }
-                else
-                {
-                    mtCOVERAGE_TEST_MARKER();
-                }
+								
+								#if ( configUSE_EDF_SCHEDULER == 0 )
+										if( pxTCB->uxPriority > pxCurrentTCB->uxPriority )
+										{
+												/* The notified task has a priority above the currently
+												 * executing task so a yield is required. */
+												taskYIELD_IF_USING_PREEMPTION();
+										}
+										else
+										{
+												mtCOVERAGE_TEST_MARKER();
+										}
+								#else /* if ( configUSE_EDF_SCHEDULER == 1 ) */
+										if( pxTCB->xTaskPeriod < pxCurrentTCB->xTaskPeriod )
+										{
+												/* The notified task has a priority above the currently
+												 * executing task so a yield is required. */
+												taskYIELD_IF_USING_PREEMPTION();
+										}
+										else
+										{
+												mtCOVERAGE_TEST_MARKER();
+										}
+								#endif
             }
             else
             {
@@ -5090,25 +5352,46 @@ TickType_t uxTaskResetEventItemValue( void )
                      * this task pending until the scheduler is resumed. */
                     listINSERT_END( &( xPendingReadyList ), &( pxTCB->xEventListItem ) );
                 }
+								
+								#if ( configUSE_EDF_SCHEDULER == 0 )
+										if( pxTCB->uxPriority > pxCurrentTCB->uxPriority )
+										{
+												/* The notified task has a priority above the currently
+												 * executing task so a yield is required. */
+												if( pxHigherPriorityTaskWoken != NULL )
+												{
+														*pxHigherPriorityTaskWoken = pdTRUE;
+												}
 
-                if( pxTCB->uxPriority > pxCurrentTCB->uxPriority )
-                {
-                    /* The notified task has a priority above the currently
-                     * executing task so a yield is required. */
-                    if( pxHigherPriorityTaskWoken != NULL )
-                    {
-                        *pxHigherPriorityTaskWoken = pdTRUE;
-                    }
+												/* Mark that a yield is pending in case the user is not
+												 * using the "xHigherPriorityTaskWoken" parameter to an ISR
+												 * safe FreeRTOS function. */
+												xYieldPending = pdTRUE;
+										}
+										else
+										{
+												mtCOVERAGE_TEST_MARKER();
+										}
+								#else /* if ( configUSE_EDF_SCHEDULER == 0 ) */
+										if( pxTCB->xTaskPeriod < pxCurrentTCB->xTaskPeriod )
+										{
+												/* The notified task has a priority above the currently
+												 * executing task so a yield is required. */
+												if( pxHigherPriorityTaskWoken != NULL )
+												{
+														*pxHigherPriorityTaskWoken = pdTRUE;
+												}
 
-                    /* Mark that a yield is pending in case the user is not
-                     * using the "xHigherPriorityTaskWoken" parameter to an ISR
-                     * safe FreeRTOS function. */
-                    xYieldPending = pdTRUE;
-                }
-                else
-                {
-                    mtCOVERAGE_TEST_MARKER();
-                }
+												/* Mark that a yield is pending in case the user is not
+												 * using the "xHigherPriorityTaskWoken" parameter to an ISR
+												 * safe FreeRTOS function. */
+												xYieldPending = pdTRUE;
+										}
+										else
+										{
+												mtCOVERAGE_TEST_MARKER();
+										}
+								#endif
             }
         }
         portCLEAR_INTERRUPT_MASK_FROM_ISR( uxSavedInterruptStatus );
@@ -5182,24 +5465,45 @@ TickType_t uxTaskResetEventItemValue( void )
                     listINSERT_END( &( xPendingReadyList ), &( pxTCB->xEventListItem ) );
                 }
 
-                if( pxTCB->uxPriority > pxCurrentTCB->uxPriority )
-                {
-                    /* The notified task has a priority above the currently
-                     * executing task so a yield is required. */
-                    if( pxHigherPriorityTaskWoken != NULL )
-                    {
-                        *pxHigherPriorityTaskWoken = pdTRUE;
-                    }
+								#if ( configUSE_EDF_SCHEDULER == 0 )
+										if( pxTCB->uxPriority > pxCurrentTCB->uxPriority )
+										{
+												/* The notified task has a priority above the currently
+												 * executing task so a yield is required. */
+												if( pxHigherPriorityTaskWoken != NULL )
+												{
+														*pxHigherPriorityTaskWoken = pdTRUE;
+												}
 
-                    /* Mark that a yield is pending in case the user is not
-                     * using the "xHigherPriorityTaskWoken" parameter in an ISR
-                     * safe FreeRTOS function. */
-                    xYieldPending = pdTRUE;
-                }
-                else
-                {
-                    mtCOVERAGE_TEST_MARKER();
-                }
+												/* Mark that a yield is pending in case the user is not
+												 * using the "xHigherPriorityTaskWoken" parameter in an ISR
+												 * safe FreeRTOS function. */
+												xYieldPending = pdTRUE;
+										}
+										else
+										{
+												mtCOVERAGE_TEST_MARKER();
+										}
+								#else /* if ( configUSE_EDF_SCHEDULER == 0 ) */
+										if( pxTCB->xTaskPeriod < pxCurrentTCB->xTaskPeriod )
+										{
+												/* The notified task has a priority above the currently
+												 * executing task so a yield is required. */
+												if( pxHigherPriorityTaskWoken != NULL )
+												{
+														*pxHigherPriorityTaskWoken = pdTRUE;
+												}
+
+												/* Mark that a yield is pending in case the user is not
+												 * using the "xHigherPriorityTaskWoken" parameter in an ISR
+												 * safe FreeRTOS function. */
+												xYieldPending = pdTRUE;
+										}
+										else
+										{
+												mtCOVERAGE_TEST_MARKER();
+										}
+								#endif
             }
         }
         portCLEAR_INTERRUPT_MASK_FROM_ISR( uxSavedInterruptStatus );

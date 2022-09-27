@@ -1,0 +1,13 @@
+Search for pxReadyTasksListEDF
+Search for xtaskcreateperiodic
+Search for initIdlePeriod
+Breakpoint xTaskCreatePeriodic and watch pxCurrentTCB and pxReadyTasksListEDF
+-----------------------------------------------------------------------------
+Search for xTaskGetTickCount() and go to tasks.c line 3717
+Go to tasks.c line 3013
+Go to tasks.c line 3035
+-----------------------------------------------------------------------------
+Go through the tasks in main.c
+Go through the trace macros in FreeRTOSConfig.h
+-----------------------------------------------------------------------------
+Run without breakpoints and display the UART window

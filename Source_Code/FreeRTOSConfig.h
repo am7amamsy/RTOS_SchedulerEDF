@@ -42,21 +42,139 @@
  * See http://www.freertos.org/a00110.html
  *----------------------------------------------------------*/
 
-#define configUSE_PREEMPTION		0
-#define configUSE_IDLE_HOOK			1
-#define configUSE_TICK_HOOK			1
+#define configUSE_PREEMPTION		1
+#define configUSE_IDLE_HOOK			0
+#define configUSE_TICK_HOOK			0
 #define configCPU_CLOCK_HZ			( ( unsigned long ) 60000000 )	/* =12.0MHz xtal multiplied by 5 using the PLL. */
 #define configTICK_RATE_HZ			( ( TickType_t ) 1000 )
 #define configMAX_PRIORITIES		( 4 )
 #define configMINIMAL_STACK_SIZE	( ( unsigned short ) 90 )
 #define configTOTAL_HEAP_SIZE		( ( size_t ) 13 * 1024 )
-#define configMAX_TASK_NAME_LEN		( 8 )
-#define configUSE_TRACE_FACILITY	0
-#define configUSE_16_BIT_TICKS		0
-#define configIDLE_SHOULD_YIELD		1
+#define configMAX_TASK_NAME_LEN	( 8 )
+#define configUSE_16_BIT_TICKS					0
+#define configIDLE_SHOULD_YIELD					1
 #define configSUPPORT_STATIC_ALLOCATION	0
-#define configUSE_TIME_SLICING      0
-#define configQUEUE_REGISTRY_SIZE 	0
+#define configUSE_TIME_SLICING      		0
+#define configQUEUE_REGISTRY_SIZE 			0
+#define configUSE_EDF_SCHEDULER					1
+
+/* Define configurations for run-time stats */
+#define configGENERATE_RUN_TIME_STATS							1
+#define portCONFIGURE_TIMER_FOR_RUN_TIME_STATS()
+#define portGET_RUN_TIME_COUNTER_VALUE()					(T1TC)
+#define configUSE_STATS_FORMATTING_FUNCTIONS			1
+#define configUSE_TRACE_FACILITY									1
+
+/* Trace hook definitions. */
+extern int Task_1_Time_In;
+extern int Task_2_Time_In;
+extern int Task_3_Time_In;
+extern int Task_4_Time_In;
+extern int Task_5_Time_In;
+extern int Task_6_Time_In;
+
+extern int Task_1_Time_Out;
+extern int Task_2_Time_Out;
+extern int Task_3_Time_Out;
+extern int Task_4_Time_Out;
+extern int Task_5_Time_Out;
+extern int Task_6_Time_Out;
+
+extern int Task_1_Time_Total;
+extern int Task_2_Time_Total;
+extern int Task_3_Time_Total;
+extern int Task_4_Time_Total;
+extern int Task_5_Time_Total;
+extern int Task_6_Time_Total;
+
+extern int System_Time;
+extern int CPU_Load;
+
+#define traceTASK_SWITCHED_OUT()	do\
+																	{\
+																		if ( (int)pxCurrentTCB->pxTaskTag == 0 )\
+																		{\
+																			GPIO_write(TASKS_PORT, TASK_0_PIN, PIN_IS_LOW);\
+																		}\
+																		else if ( (int)pxCurrentTCB->pxTaskTag == 1 )\
+																		{\
+																			GPIO_write(TASKS_PORT, TASK_1_PIN, PIN_IS_LOW);\
+																			Task_1_Time_Out = T1TC;\
+																			Task_1_Time_Total += (((Task_1_Time_Out - Task_1_Time_In) * TIMER_1_FREQ_SCALED) / CPU_FREQ_SCALED);\
+																		}\
+																		else if ( (int)pxCurrentTCB->pxTaskTag == 2 )\
+																		{\
+																			GPIO_write(TASKS_PORT, TASK_2_PIN, PIN_IS_LOW);\
+																			Task_2_Time_Out = T1TC;\
+																			Task_2_Time_Total += (((Task_2_Time_Out - Task_2_Time_In) * TIMER_1_FREQ_SCALED) / CPU_FREQ_SCALED);\
+																		}\
+																		else if ( (int)pxCurrentTCB->pxTaskTag == 3 )\
+																		{\
+																			GPIO_write(TASKS_PORT, TASK_3_PIN, PIN_IS_LOW);\
+																			Task_3_Time_Out = T1TC;\
+																			Task_3_Time_Total += (((Task_3_Time_Out - Task_3_Time_In) * TIMER_1_FREQ_SCALED) / CPU_FREQ_SCALED);\
+																		}\
+																		else if ( (int)pxCurrentTCB->pxTaskTag == 4 )\
+																		{\
+																			GPIO_write(TASKS_PORT, TASK_4_PIN, PIN_IS_LOW);\
+																			Task_4_Time_Out = T1TC;\
+																			Task_4_Time_Total += (((Task_4_Time_Out - Task_4_Time_In) * TIMER_1_FREQ_SCALED) / CPU_FREQ_SCALED);\
+																		}\
+																		else if ( (int)pxCurrentTCB->pxTaskTag == 5 )\
+																		{\
+																			GPIO_write(TASKS_PORT, TASK_5_PIN, PIN_IS_LOW);\
+																			Task_5_Time_Out = T1TC;\
+																			Task_5_Time_Total += (((Task_5_Time_Out - Task_5_Time_In) * TIMER_1_FREQ_SCALED) / CPU_FREQ_SCALED);\
+																		}\
+																		else if ( (int)pxCurrentTCB->pxTaskTag == 6 )\
+																		{\
+																			GPIO_write(TASKS_PORT, TASK_6_PIN, PIN_IS_LOW);\
+																			Task_6_Time_Out = T1TC;\
+																			Task_6_Time_Total += (((Task_6_Time_Out - Task_6_Time_In) * TIMER_1_FREQ_SCALED) / CPU_FREQ_SCALED);\
+																		}\
+																		System_Time = ((T1TC * TIMER_1_FREQ_SCALED) / CPU_FREQ_SCALED);\
+																		CPU_Load = ((Task_1_Time_Total + Task_2_Time_Total + Task_3_Time_Total + Task_4_Time_Total + Task_5_Time_Total + Task_6_Time_Total) / (float)System_Time) * 1000;\
+																	}\
+																	while(0)
+																		 
+#define traceTASK_SWITCHED_IN()		do\
+																	{\
+																		if ( (int)pxCurrentTCB->pxTaskTag == 0 )\
+																		{\
+																			GPIO_write(TASKS_PORT, TASK_0_PIN, PIN_IS_HIGH);\
+																		}\
+																		else if ( (int)pxCurrentTCB->pxTaskTag == 1 )\
+																		{\
+																			GPIO_write(TASKS_PORT, TASK_1_PIN, PIN_IS_HIGH);\
+																			Task_1_Time_In = T1TC;\
+																		}\
+																		else if ( (int)pxCurrentTCB->pxTaskTag == 2 )\
+																		{\
+																			GPIO_write(TASKS_PORT, TASK_2_PIN, PIN_IS_HIGH);\
+																			Task_2_Time_In = T1TC;\
+																		}\
+																		else if ( (int)pxCurrentTCB->pxTaskTag == 3 )\
+																		{\
+																			GPIO_write(TASKS_PORT, TASK_3_PIN, PIN_IS_HIGH);\
+																			Task_3_Time_In = T1TC;\
+																		}\
+																		else if ( (int)pxCurrentTCB->pxTaskTag == 4 )\
+																		{\
+																			GPIO_write(TASKS_PORT, TASK_4_PIN, PIN_IS_HIGH);\
+																			Task_4_Time_In = T1TC;\
+																		}\
+																		else if ( (int)pxCurrentTCB->pxTaskTag == 5 )\
+																		{\
+																			GPIO_write(TASKS_PORT, TASK_5_PIN, PIN_IS_HIGH);\
+																			Task_5_Time_In = T1TC;\
+																		}\
+																		else if ( (int)pxCurrentTCB->pxTaskTag == 6 )\
+																		{\
+																			GPIO_write(TASKS_PORT, TASK_6_PIN, PIN_IS_HIGH);\
+																			Task_6_Time_In = T1TC;\
+																		}\
+																	}\
+																	while(0)
 
 /* Co-routine definitions. */
 #define configUSE_CO_ROUTINES 		0
@@ -65,14 +183,27 @@
 /* Set the following definitions to 1 to include the API function, or zero
 to exclude the API function. */
 
-#define INCLUDE_vTaskPrioritySet		1
-#define INCLUDE_uxTaskPriorityGet		1
-#define INCLUDE_vTaskDelete				1
-#define INCLUDE_vTaskCleanUpResources	0
-#define INCLUDE_vTaskSuspend			1
-#define INCLUDE_vTaskDelayUntil			1
-#define INCLUDE_vTaskDelay				1
+#define INCLUDE_vTaskPrioritySet				1
+#define INCLUDE_uxTaskPriorityGet				1
+#define INCLUDE_vTaskDelete							1
+#define INCLUDE_vTaskCleanUpResources		0
+#define INCLUDE_vTaskSuspend						1
+#define INCLUDE_vTaskDelayUntil					1
+#define INCLUDE_vTaskDelay							1
+#define configUSE_APPLICATION_TASK_TAG	1
 
+/* Define the port and pins for the task GPIOs. */
+#define TASKS_PORT	PORT_0
+#define TASK_0_PIN	PIN8
+#define TASK_1_PIN	PIN2
+#define TASK_2_PIN	PIN3
+#define TASK_3_PIN	PIN4
+#define TASK_4_PIN	PIN5
+#define TASK_5_PIN	PIN6
+#define TASK_6_PIN	PIN7
 
-
+/* Define the CPU clock and Timer 1 scaled frequencies. */
+#define CPU_FREQ_SCALED			1200 // 12MHz / 10,000
+#define TIMER_1_FREQ_SCALED	2		 // 20kHz / 10,000
+																	
 #endif /* FREERTOS_CONFIG_H */
